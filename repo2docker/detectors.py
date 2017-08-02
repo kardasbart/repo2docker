@@ -720,7 +720,7 @@ class LegacyBinderDockerBuildPack(DockerBuildPack):
     WORKDIR /home/main/notebooks
     ENV PATH /home/main/anaconda2/envs/python3/bin:$PATH
     RUN conda install -n python3 notebook==5.0.0 ipykernel==4.6.0 && \
-        pip install jupyterhub==0.7.2 && \
+        pip install git+https://github.com/jupyterhub/jupyterhub@master && \
         conda remove -n python3 nb_conda_kernels && \
         conda install -n root ipykernel==4.6.0 && \
         /home/main/anaconda2/envs/python3/bin/ipython kernel install --sys-prefix && \
