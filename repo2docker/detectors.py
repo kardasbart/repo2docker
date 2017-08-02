@@ -481,7 +481,7 @@ class PythonBuildPack(BuildPack):
             r"""
             pip install --no-cache-dir \
                 notebook==5.0.0 \
-                jupyterhub==0.7.2 \
+                git+https://github.com/jupyterhub/jupyterhub@master \
                 ipywidgets==6.0.0 \
                 jupyterlab==0.24.1 && \
             jupyter nbextension enable --py widgetsnbextension --sys-prefix && \
