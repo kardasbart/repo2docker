@@ -10,7 +10,7 @@ else:
 
 setup(
     name='jupyter-repo2docker',
-    version=versioneer.get_version(),
+    version='0.8.0dev',
     install_requires=[
         'docker',
         'traitlets',
