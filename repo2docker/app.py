@@ -54,6 +54,14 @@ class Repo2Docker(Application):
         """The application's default log level"""
         return logging.INFO
 
+    config_file = Unicode(
+        'repo2docker_config.py',
+        help="""
+        Config file to load repo2docker config from
+        """,
+        config=True
+    )
+
     git_workdir = Unicode(
         None,
         config=True,
@@ -430,6 +438,7 @@ class Repo2Docker(Application):
     def initialize(self):
         """Init repo2docker configuration before start"""
         # FIXME: Remove this function, move it to setters / traitlet reactors
+        self.load_config_file(self.config_file)
         if self.json_logs:
             # register JSON excepthook to avoid non-JSON output on errors
             sys.excepthook = self.json_excepthook
