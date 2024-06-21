@@ -1,14 +1,13 @@
-import zipfile
+import json
 import os
 import shutil
 import time
-import json
-from datetime import datetime, timezone, timedelta
-
+import zipfile
+from datetime import datetime, timedelta, timezone
 from urllib.request import urlretrieve
 
-from .doi import DoiProvider
 from .base import ContentProviderException
+from .doi import DoiProvider
 
 
 class Hydroshare(DoiProvider):
@@ -16,9 +15,7 @@ class Hydroshare(DoiProvider):
 
     def _fetch_version(self, host):
         """Fetch resource modified date and convert to epoch"""
-        json_response = json.loads(
-            self.urlopen(host["version"].format(self.resource_id)).read()
-        )
+        json_response = self.urlopen(host["version"].format(self.resource_id)).json()
         date = next(
             item for item in json_response["dates"] if item["type"] == "modified"
         )["start_date"]
@@ -61,16 +58,16 @@ class Hydroshare(DoiProvider):
         resource_id = spec["resource"]
         host = spec["host"]
 
-        bag_url = "{}{}".format(host["django_irods"], resource_id)
+        bag_url = f'{host["django_irods"]}{resource_id}'
 
-        yield "Downloading {}.\n".format(bag_url)
+        yield f"Downloading {bag_url}.\n"
 
         # bag downloads are prepared on demand and may need some time
         conn = self.urlopen(bag_url)
         total_wait_time = 0
         while (
-            conn.getcode() == 200
-            and conn.info().get_content_type() != "application/zip"
+            conn.status_code == 200
+            and conn.headers["content-type"] != "application/zip"
         ):
             wait_time = 10
             total_wait_time += wait_time
@@ -78,13 +75,11 @@ class Hydroshare(DoiProvider):
                 msg = "Bag taking too long to prepare, exiting now, try again later."
                 yield msg
                 raise ContentProviderException(msg)
-            yield "Bag is being prepared, requesting again in {} seconds.\n".format(
-                wait_time
-            )
+            yield f"Bag is being prepared, requesting again in {wait_time} seconds.\n"
             time.sleep(wait_time)
             conn = self.urlopen(bag_url)
-        if conn.getcode() != 200:
-            msg = "Failed to download bag. status code {}.\n".format(conn.getcode())
+        if conn.status_code != 200:
+            msg = f"Failed to download bag. status code {conn.status_code}.\n"
             yield msg
             raise ContentProviderException(msg)
         # Bag creation seems to need a small time buffer after it says it's ready.
@@ -104,4 +99,4 @@ class Hydroshare(DoiProvider):
     @property
     def content_id(self):
         """The HydroShare resource ID"""
-        return "{}.v{}".format(self.resource_id, self.version)
+        return f"{self.resource_id}.v{self.version}"

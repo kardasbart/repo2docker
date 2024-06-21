@@ -1,5 +1,6 @@
 """Test if assemble scripts from outside of r2d repo are accepted."""
 import time
+
 from repo2docker.app import Repo2Docker
 from repo2docker.buildpacks import PythonBuildPack
 
@@ -32,7 +33,7 @@ def test_Repo2Docker_external_build_scripts(tmpdir):
     assert container.status == "running"
 
     try:
-        status, output = container.exec_run(["sh", "-c", "cat /tmp/my_extra_script"])
+        status, output = container._c.exec_run(["sh", "-c", "cat /tmp/my_extra_script"])
         assert status == 0
         assert output.decode("utf-8") == "Hello World of Absolute Paths!"
     finally:

@@ -1,42 +1,59 @@
 """
 Custom test collector for our integration tests.
 
-Each directory that has a script named 'verify' is considered
-a test. jupyter-repo2docker is run on that directory,
-and then ./verify is run inside the built container. It should
-return a non-zero exit code for the test to be considered a
-success.
+
+Test lifecycle:
+- Find all directories that contain `verify` or `*.repos.yaml`
+- If `verify` is found:
+    - Run `jupyter-repo2docker` on the test directory.
+      - Extra arguments may be added as YAML list of strings in `extra-args.yaml`.
+    - Run `./verify` inside the built container.
+    - It should return a non-zero exit code for the test to be considered a
+      successful.
+- If a `*.repos.yaml` is found:
+    - For each entry of the form `{name, url, ref, verify}`
+        - Run `jupyter-repo2docker` with the `url` and `ref`
+        - Run the `verify` inside the built container
 """
 
 import os
 import pipes
 import shlex
-import requests
 import subprocess
 import time
-
 from tempfile import TemporaryDirectory
 
+import escapism
 import pytest
+import requests
 import yaml
 
-from repo2docker.app import Repo2Docker
 from repo2docker.__main__ import make_r2d
+
+TESTS_DIR = os.path.abspath(os.path.dirname(__file__))
 
 
 def pytest_collect_file(parent, path):
     if path.basename == "verify":
-        return LocalRepo(path, parent)
+        return LocalRepo.from_parent(parent, fspath=path)
     elif path.basename.endswith(".repos.yaml"):
-        return RemoteRepoList(path, parent)
+        return RemoteRepoList.from_parent(parent, fspath=path)
 
 
-def make_test_func(args):
+def make_test_func(args, skip_build=False, extra_run_kwargs=None):
     """Generate a test function that runs repo2docker"""
 
     def test():
         app = make_r2d(args)
         app.initialize()
+        if extra_run_kwargs:
+            app.extra_run_kwargs.update(extra_run_kwargs)
+        if skip_build:
+
+            def build_noop():
+                print("Skipping build")
+
+            app.skip_build = build_noop
         if app.run_cmd:
             # verify test, run it
             app.start()
@@ -47,7 +64,7 @@ def make_test_func(args):
         container = app.start_container()
         port = app.port
         # wait a bit for the container to be ready
-        container_url = "http://localhost:%s/api" % port
+        container_url = f"http://localhost:{port}/api"
         # give the container a chance to start
         time.sleep(1)
         try:
@@ -59,13 +76,13 @@ def make_test_func(args):
                 try:
                     info = requests.get(container_url).json()
                 except Exception as e:
-                    print("Error: %s" % e)
+                    print(f"Error: {e}")
                     time.sleep(i * 3)
                 else:
                     print(info)
                     success = True
                     break
-            assert success, "Notebook never started in %s" % container
+            assert success, f"Notebook never started in {container}"
         finally:
             # stop the container
             container.stop()
@@ -81,6 +98,14 @@ def run_repo2docker():
         return make_test_func(args)()
 
     return run_test
+
+
+@pytest.fixture()
+def base_image():
+    """
+    Base ubuntu image to use when testing specific BuildPacks
+    """
+    return "buildpack-deps:bionic"
 
 
 def _add_content_to_git(repo_dir):
@@ -122,7 +147,7 @@ def repo_with_content(git_repo):
     yield git_repo, sha1
 
 
-@pytest.fixture()
+@pytest.fixture
 def repo_with_submodule():
     """Create a git repository with a git submodule in a non-master branch.
 
@@ -135,15 +160,13 @@ def repo_with_submodule():
     the submodule yet.
 
     """
-    with TemporaryDirectory() as git_a_dir, TemporaryDirectory() as git_b_dir:
+    submodule_repo = "https://github.com/binderhub-ci-repos/requirements"
+    submod_sha1_b = "20c4fe55a9b2c5011d228545e821b1c7b1723652"
+
+    with TemporaryDirectory() as git_a_dir:
         # create "parent" repository
         subprocess.check_call(["git", "init"], cwd=git_a_dir)
         _add_content_to_git(git_a_dir)
-        # create repository with 2 commits that will be the submodule
-        subprocess.check_call(["git", "init"], cwd=git_b_dir)
-        _add_content_to_git(git_b_dir)
-        submod_sha1_b = _get_sha1(git_b_dir)
-        _add_content_to_git(git_b_dir)
 
         # create a new branch in the parent without any submodule
         subprocess.check_call(
@@ -154,7 +177,14 @@ def repo_with_submodule():
             ["git", "checkout", "-b", "branch-with-submod"], cwd=git_a_dir
         )
         subprocess.check_call(
-            ["git", "submodule", "add", git_b_dir, "submod"], cwd=git_a_dir
+            [
+                "git",
+                "submodule",
+                "add",
+                submodule_repo,
+                "submod",
+            ],
+            cwd=git_a_dir,
         )
         # checkout the first commit for the submod, not the latest
         subprocess.check_call(
@@ -172,20 +202,24 @@ def repo_with_submodule():
 class Repo2DockerTest(pytest.Function):
     """A pytest.Item for running repo2docker"""
 
-    def __init__(self, name, parent, args):
+    def __init__(
+        self, name, parent, args=None, skip_build=False, extra_run_kwargs=None
+    ):
         self.args = args
         self.save_cwd = os.getcwd()
-        f = parent.obj = make_test_func(args)
+        f = parent.obj = make_test_func(
+            args, skip_build=skip_build, extra_run_kwargs=extra_run_kwargs
+        )
         super().__init__(name, parent, callobj=f)
 
     def reportinfo(self):
-        return self.parent.fspath, None, ""
+        return (self.parent.fspath, None, "")
 
     def repr_failure(self, excinfo):
         err = excinfo.value
         if isinstance(err, SystemExit):
-            cmd = "jupyter-repo2docker %s" % " ".join(map(pipes.quote, self.args))
-            return "%s | exited with status=%s" % (cmd, err.code)
+            cmd = f'jupyter-repo2docker {" ".join(map(pipes.quote, self.args))}'
+            return f"{cmd} | exited with status={err.code}"
         else:
             return super().repr_failure(excinfo)
 
@@ -199,16 +233,42 @@ class LocalRepo(pytest.File):
         args = ["--appendix", 'RUN echo "appendix" > /tmp/appendix']
         # If there's an extra-args.yaml file in a test dir, assume it contains
         # a yaml list with extra arguments to be passed to repo2docker
-        extra_args_path = os.path.join(self.fspath.dirname, "extra-args.yaml")
+        extra_args_path = os.path.join(self.fspath.dirname, "test-extra-args.yaml")
         if os.path.exists(extra_args_path):
             with open(extra_args_path) as f:
                 extra_args = yaml.safe_load(f)
             args += extra_args
 
+        print(self.fspath.basename, self.fspath.dirname, str(self.fspath))
+        # re-use image name for multiple tests of the same image
+        # so we don't run through the build twice
+        rel_repo_dir = os.path.relpath(self.fspath.dirname, TESTS_DIR)
+        image_name = f"r2d-tests-{escapism.escape(rel_repo_dir, escape_char='-').lower()}-{int(time.time())}"
+        args.append(f"--image-name={image_name}")
         args.append(self.fspath.dirname)
+        yield Repo2DockerTest.from_parent(self, name="build", args=args)
 
-        yield Repo2DockerTest("build", self, args=args)
-        yield Repo2DockerTest(self.fspath.basename, self, args=args + ["./verify"])
+        yield Repo2DockerTest.from_parent(
+            self,
+            name=self.fspath.basename,
+            args=args + ["./verify"],
+            skip_build=True,
+        )
+
+        # mount the tests dir as a volume
+        check_tmp_args = (
+            args[:-1]
+            + ["--volume", f"{TESTS_DIR}:/io/tests"]
+            + [args[-1], "/io/tests/check-tmp"]
+        )
+
+        yield Repo2DockerTest.from_parent(
+            self,
+            name="check-tmp",
+            args=check_tmp_args,
+            skip_build=True,
+            extra_run_kwargs={"user": "root"},
+        )
 
 
 class RemoteRepoList(pytest.File):
@@ -220,4 +280,5 @@ class RemoteRepoList(pytest.File):
             if "ref" in repo:
                 args += ["--ref", repo["ref"]]
             args += [repo["url"], "--"] + shlex.split(repo["verify"])
-            yield Repo2DockerTest(repo["name"], self, args=args)
+
+            yield Repo2DockerTest.from_parent(self, name=repo["name"], args=args)

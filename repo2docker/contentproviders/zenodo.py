@@ -1,24 +1,34 @@
-import os
 import json
+import os
 import shutil
-
-from os import makedirs
-from os import path
-from urllib.request import Request
+from os import makedirs, path
 from urllib.error import HTTPError
+from urllib.request import Request
 
-from .doi import DoiProvider
 from ..utils import copytree, deep_get
+from .doi import DoiProvider
 
 
 class Zenodo(DoiProvider):
     """Provide contents of a Zenodo deposit."""
 
     def __init__(self):
+        super().__init__()
         # We need the hostname (url where records are), api url (for metadata),
         # filepath (path to files in metadata), filename (path to filename in
         # metadata), download (path to file download URL), and type (path to item type in metadata)
         self.hosts = [
+            {
+                "hostname": [
+                    "https://sandbox.zenodo.org/record/",
+                    "http://sandbox.zenodo.org/record/",
+                ],
+                "api": "https://sandbox.zenodo.org/api/records/",
+                "filepath": "files",
+                "filename": "filename",
+                "download": "links.download",
+                "type": "metadata.upload_type",
+            },
             {
                 "hostname": ["https://zenodo.org/record/", "http://zenodo.org/record/"],
                 "api": "https://zenodo.org/api/records/",
@@ -54,23 +64,18 @@ class Zenodo(DoiProvider):
         record_id = spec["record"]
         host = spec["host"]
 
-        yield "Fetching Zenodo record {}.\n".format(record_id)
-        req = Request(
-            "{}{}".format(host["api"], record_id),
+        yield f"Fetching Zenodo record {record_id}.\n"
+        resp = self.urlopen(
+            f'{host["api"]}{record_id}',
             headers={"accept": "application/json"},
         )
-        resp = self.urlopen(req)
 
-        record = json.loads(resp.read().decode("utf-8"))
+        record = resp.json()
 
-        is_software = deep_get(record, host["type"]).lower() == "software"
         files = deep_get(record, host["filepath"])
         only_one_file = len(files) == 1
         for file_ref in files:
-            for line in self.fetch_file(
-                file_ref, host, output_dir, is_software and only_one_file
-            ):
-                yield line
+            yield from self.fetch_file(file_ref, host, output_dir, unzip=only_one_file)
 
     @property
     def content_id(self):

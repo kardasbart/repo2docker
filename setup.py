@@ -1,6 +1,8 @@
-from distutils.cmd import Command
-from setuptools import setup, find_packages
 import sys
+from distutils.cmd import Command
+
+from setuptools import find_packages, setup
+
 import versioneer
 
 if sys.version_info[0] < 3:
@@ -23,8 +25,8 @@ class GenerateDataverseInstallationsFileCommand(Command):
         pass
 
     def run(self):
-        from urllib.request import urlopen
         import json
+        from urllib.request import urlopen
 
         resp = urlopen(self.url, timeout=5)
         resp_body = resp.read()
@@ -47,24 +49,28 @@ setup(
     name="jupyter-repo2docker",
     version=versioneer.get_version(),
     install_requires=[
-        "docker",
-        "traitlets",
-        "python-json-logger",
+        "chardet",
+        "docker!=5.0.0",
+        "entrypoints",
         "escapism",
+        "iso8601",
         "jinja2",
+        "python-json-logger",
+        "requests",
         "ruamel.yaml>=0.15",
-        "toml",
         "semver",
+        "toml",
+        "traitlets",
     ],
-    python_requires=">=3.5",
+    python_requires=">=3.6",
     author="Project Jupyter Contributors",
     author_email="jupyter@googlegroups.com",
     url="https://repo2docker.readthedocs.io/en/latest/",
     project_urls={
         "Documentation": "https://repo2docker.readthedocs.io",
         "Funding": "https://jupyter.org/about",
-        "Source": "https://github.com/jupyter/repo2docker/",
-        "Tracker": "https://github.com/jupyter/repo2docker/issues",
+        "Source": "https://github.com/jupyterhub/repo2docker/",
+        "Tracker": "https://github.com/jupyterhub/repo2docker/issues",
     },
     # this should be a whitespace separated string of keywords, not a list
     keywords="reproducible science environments docker",
@@ -88,6 +94,7 @@ setup(
         "console_scripts": [
             "jupyter-repo2docker = repo2docker.__main__:main",
             "repo2docker = repo2docker.__main__:main",
-        ]
+        ],
+        "repo2docker.engines": ["docker = repo2docker.docker:DockerEngine"],
     },
 )

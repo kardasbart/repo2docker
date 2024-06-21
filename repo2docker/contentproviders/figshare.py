@@ -1,21 +1,19 @@
+import json
 import os
 import re
-import json
 import shutil
-
-from os import makedirs
-from os import path
-from urllib.request import Request
+from os import makedirs, path
 from urllib.error import HTTPError
+from urllib.request import Request
 from zipfile import is_zipfile
 
-from .doi import DoiProvider
 from ..utils import copytree, deep_get
+from .doi import DoiProvider
 
 
 class Figshare(DoiProvider):
     """Provide contents of a Figshare article.
-    
+
     See https://docs.figshare.com/#public_article for API docs.
 
     Examples:
@@ -25,6 +23,7 @@ class Figshare(DoiProvider):
     """
 
     def __init__(self):
+        super().__init__()
         self.hosts = [
             {
                 "hostname": [
@@ -39,7 +38,10 @@ class Figshare(DoiProvider):
             }
         ]
 
-    url_regex = re.compile(r"(.*)/articles/([^/]+)/(\d+)(/)?(\d+)?")
+    # We may need to add other item types in future, see
+    # https://github.com/jupyterhub/repo2docker/pull/1001#issuecomment-760107436
+    # for a list
+    url_regex = re.compile(r"(.*)/articles/(code/|dataset/)?([^/]+)/(\d+)(/)?(\d+)?")
 
     def detect(self, doi, ref=None, extra_args=None):
         """Trigger this provider for things that resolve to a Figshare article"""
@@ -53,8 +55,8 @@ class Figshare(DoiProvider):
             if any([url.startswith(s) for s in host["hostname"]]):
                 match = self.url_regex.match(url)
                 if match:
-                    self.article_id = match.groups()[2]
-                    self.article_version = match.groups()[4]
+                    self.article_id = match.groups()[3]
+                    self.article_version = match.groups()[5]
                     if not self.article_version:
                         self.article_version = "1"
                     return {
@@ -71,16 +73,13 @@ class Figshare(DoiProvider):
         article_version = spec["version"]
         host = spec["host"]
 
-        yield "Fetching Figshare article {} in version {}.\n".format(
-            article_id, article_version
-        )
-        req = Request(
-            "{}{}/versions/{}".format(host["api"], article_id, article_version),
+        yield f"Fetching Figshare article {article_id} in version {article_version}.\n"
+        resp = self.urlopen(
+            f'{host["api"]}{article_id}/versions/{article_version}',
             headers={"accept": "application/json"},
         )
-        resp = self.urlopen(req)
 
-        article = json.loads(resp.read().decode("utf-8"))
+        article = resp.json()
 
         files = deep_get(article, host["filepath"])
         # only fetch files where is_link_only: False
@@ -88,10 +87,9 @@ class Figshare(DoiProvider):
         only_one_file = len(files) == 1
         for file_ref in files:
             unzip = file_ref["name"].endswith(".zip") and only_one_file
-            for line in self.fetch_file(file_ref, host, output_dir, unzip):
-                yield line
+            yield from self.fetch_file(file_ref, host, output_dir, unzip)
 
     @property
     def content_id(self):
         """The Figshare article ID"""
-        return "{}.v{}".format(self.article_id, self.article_version)
+        return f"{self.article_id}.v{self.article_version}"

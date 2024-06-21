@@ -1,7 +1,9 @@
 """Generates a variety of Dockerfiles based on an input matrix
 """
 import os
+
 import docker
+
 from .base import BuildPack
 
 
@@ -14,7 +16,7 @@ class DockerBuildPack(BuildPack):
         """Check if current repo should be built with the Docker BuildPack"""
         return os.path.exists(self.binder_path("Dockerfile"))
 
-    def render(self):
+    def render(self, build_args=None):
         """Render the Dockerfile using by reading it from the source repo"""
         Dockerfile = self.binder_path("Dockerfile")
         with open(Dockerfile) as f:
@@ -34,8 +36,8 @@ class DockerBuildPack(BuildPack):
         # buildpacks/base.py where it is duplicated
         if not isinstance(memory_limit, int):
             raise ValueError(
-                "The memory limit has to be specified as an"
-                "integer but is '{}'".format(type(memory_limit))
+                "The memory limit has to be specified as an "
+                f"integer but is '{type(memory_limit)}'"
             )
         limits = {}
         if memory_limit:
@@ -50,14 +52,11 @@ class DockerBuildPack(BuildPack):
             dockerfile=self.binder_path(self.dockerfile),
             tag=image_spec,
             buildargs=build_args,
-            decode=True,
-            forcerm=True,
-            rm=True,
             container_limits=limits,
             cache_from=cache_from,
+            labels=self.get_labels(),
         )
 
         build_kwargs.update(extra_build_kwargs)
 
-        for line in client.build(**build_kwargs):
-            yield line
+        yield from client.build(**build_kwargs)

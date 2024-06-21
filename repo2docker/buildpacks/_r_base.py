@@ -3,63 +3,49 @@ Base information for using R in BuildPacks.
 
 Keeping this in r.py would lead to cyclic imports.
 """
-
-# Via https://rstudio.com/products/rstudio/download-server/debian-ubuntu/
-RSTUDIO_URL = "https://download2.rstudio.org/server/bionic/amd64/rstudio-server-1.2.5001-amd64.deb"
-# This is MD5, because that is what RStudio download page provides!
-RSTUDIO_CHECKSUM = "d33881b9ab786c09556c410e7dc477de"
-
-# Via https://www.rstudio.com/products/shiny/download-server/
-SHINY_URL = "https://download3.rstudio.org/ubuntu-14.04/x86_64/shiny-server-1.5.12.933-amd64.deb"
-SHINY_CHECKSUM = "9aeef6613e7f58f21c97a4600921340e"
-
-# Version of MRAN to pull devtools from.
-DEVTOOLS_VERSION = "2018-02-01"
-
-# IRKernel version - specified as a tag in the IRKernel repository
-IRKERNEL_VERSION = "1.0.2"
+from ..semver import parse_version as V
 
 
-def rstudio_base_scripts():
+def rstudio_base_scripts(r_version):
     """Base steps to install RStudio and shiny-server."""
+
+    # Shiny server (not the package!) seems to be the same version for all R versions
+    shiny_server_url = "https://download3.rstudio.org/ubuntu-14.04/x86_64/shiny-server-1.5.17.973-amd64.deb"
+    shiny_proxy_version = "1.1"
+    shiny_sha256sum = "80f1e48f6c824be7ef9c843bb7911d4981ac7e8a963e0eff823936a8b28476ee"
+
+    rstudio_url = "https://download2.rstudio.org/server/bionic/amd64/rstudio-server-2022.02.1-461-amd64.deb"
+    rstudio_sha256sum = (
+        "239e8d93e103872e7c6d827113d88871965f82ffb0397f5638025100520d8a54"
+    )
+    rsession_proxy_version = "2.0.1"
+
     return [
         (
             "root",
-            # Install RStudio!
-            r"""
-                curl --silent --location --fail {rstudio_url} > /tmp/rstudio.deb && \
-                echo '{rstudio_checksum} /tmp/rstudio.deb' | md5sum -c - && \
-                apt-get update && \
-                apt install -y /tmp/rstudio.deb && \
-                rm /tmp/rstudio.deb && \
-                apt-get -qq purge && \
-                apt-get -qq clean && \
-                rm -rf /var/lib/apt/lists/*
-                """.format(
-                rstudio_url=RSTUDIO_URL, rstudio_checksum=RSTUDIO_CHECKSUM
-            ),
-        ),
-        (
-            "root",
-            # Install Shiny Server!
-            r"""
-                curl --silent --location --fail {url} > {deb} && \
-                echo '{checksum} {deb}' | md5sum -c - && \
-                dpkg -i {deb} && \
-                rm {deb}
-                """.format(
-                url=SHINY_URL, checksum=SHINY_CHECKSUM, deb="/tmp/shiny.deb"
-            ),
+            # we should have --no-install-recommends on all our apt-get install commands,
+            # but here it's important because these recommend r-base,
+            # which will upgrade the installed version of R, undoing our pinned version
+            rf"""
+            curl --silent --location --fail {rstudio_url} > /tmp/rstudio.deb && \
+            curl --silent --location --fail {shiny_server_url} > /tmp/shiny.deb && \
+            echo '{rstudio_sha256sum} /tmp/rstudio.deb' | sha256sum -c - && \
+            echo '{shiny_sha256sum} /tmp/shiny.deb' | sha256sum -c - && \
+            apt-get update > /dev/null && \
+            apt install -y --no-install-recommends /tmp/rstudio.deb /tmp/shiny.deb && \
+            rm /tmp/*.deb && \
+            apt-get -qq purge && \
+            apt-get -qq clean && \
+            rm -rf /var/lib/apt/lists/*
+            """,
         ),
         (
             "${NB_USER}",
-            # Install nbrsessionproxy
-            r"""
-                pip install --no-cache-dir https://github.com/jupyterhub/jupyter-server-proxy/archive/7ac0125.zip && \
-                pip install --no-cache-dir jupyter-rsession-proxy==1.0b6 && \
-                jupyter serverextension enable jupyter_server_proxy --sys-prefix && \
-                jupyter nbextension install --py jupyter_server_proxy --sys-prefix && \
-                jupyter nbextension enable --py jupyter_server_proxy --sys-prefix
+            # Install jupyter-rsession-proxy
+            rf"""
+                pip install --no-cache \
+                    jupyter-rsession-proxy=={rsession_proxy_version} \
+                    jupyter-shiny-proxy=={shiny_proxy_version}
                 """,
         ),
         (

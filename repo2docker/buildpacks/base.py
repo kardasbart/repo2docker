@@ -1,22 +1,21 @@
-import textwrap
-import jinja2
-import tarfile
+import hashlib
 import io
+import logging
 import os
 import re
-import logging
 import string
 import sys
-import hashlib
+import tarfile
+import textwrap
+
 import escapism
-import xml.etree.ElementTree as ET
+import jinja2
 
-from traitlets import Dict
-
+# Only use syntax features supported by Docker 17.09
 TEMPLATE = r"""
-FROM buildpack-deps:bionic
+FROM {{base_image}}
 
-# avoid prompts from apt
+# Avoid prompts from apt
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Set up locales properly
@@ -29,18 +28,18 @@ RUN apt-get -qq update && \
 RUN echo "en_US.UTF-8 UTF-8" > /etc/locale.gen && \
     locale-gen
 
-ENV LC_ALL en_US.UTF-8
-ENV LANG en_US.UTF-8
-ENV LANGUAGE en_US.UTF-8
+ENV LC_ALL=en_US.UTF-8 \
+    LANG=en_US.UTF-8 \
+    LANGUAGE=en_US.UTF-8
 
 # Use bash as default shell, rather than sh
-ENV SHELL /bin/bash
+ENV SHELL=/bin/bash
 
 # Set up user
 ARG NB_USER
 ARG NB_UID
-ENV USER ${NB_USER}
-ENV HOME /home/${NB_USER}
+ENV USER=${NB_USER} \
+    HOME=/home/${NB_USER}
 
 RUN groupadd \
         --gid ${NB_UID} \
@@ -53,11 +52,6 @@ RUN groupadd \
         --shell /bin/bash \
         --uid ${NB_UID} \
         ${NB_USER}
-
-RUN wget --quiet -O - https://deb.nodesource.com/gpgkey/nodesource.gpg.key |  apt-key add - && \
-    DISTRO="bionic" && \
-    echo "deb https://deb.nodesource.com/node_10.x $DISTRO main" >> /etc/apt/sources.list.d/nodesource.list && \
-    echo "deb-src https://deb.nodesource.com/node_10.x $DISTRO main" >> /etc/apt/sources.list.d/nodesource.list
 
 # Base package installs are not super interesting to users, so hide their outputs
 # If install fails for some reason, errors will still be printed
@@ -88,30 +82,38 @@ EXPOSE 8888
 {% if build_env -%}
 # Environment variables required for build
 {% for item in build_env -%}
-ENV {{item[0]}} {{item[1]}}
+ENV {{item[0]}}={{item[1]}}
 {% endfor -%}
 {% endif -%}
 
 {% if path -%}
 # Special case PATH
-ENV PATH {{ ':'.join(path) }}:${PATH}
+ENV PATH={{ ':'.join(path) }}:${PATH}
 {% endif -%}
 
 {% if build_script_files -%}
 # If scripts required during build are present, copy them
 {% for src, dst in build_script_files|dictsort %}
-COPY {{ src }} {{ dst }}
+COPY --chown={{ user }}:{{ user }} {{ src }} {{ dst }}
 {% endfor -%}
 {% endif -%}
 
 {% for sd in build_script_directives -%}
-{{sd}}
+{{ sd }}
 {% endfor %}
+# ensure root user after build scripts
+USER root
 
 # Allow target path repo is cloned to be configurable
 ARG REPO_DIR=${HOME}
-ENV REPO_DIR ${REPO_DIR}
+ENV REPO_DIR=${REPO_DIR}
+# Create a folder and grant the user permissions if it doesn't exist
+RUN if [ ! -d "${REPO_DIR}" ]; then \
+        /usr/bin/install -o ${NB_USER} -g ${NB_USER} -d "${REPO_DIR}"; \
+    fi
+
 WORKDIR ${REPO_DIR}
+RUN chown ${NB_USER}:${NB_USER} ${REPO_DIR}
 
 # We want to allow two things:
 #   1. If there's a .local/bin directory in the repo, things there
@@ -121,12 +123,12 @@ WORKDIR ${REPO_DIR}
 #
 # The XDG standard suggests ~/.local/bin as the path for local user-specific
 # installs. See https://specifications.freedesktop.org/basedir-spec/basedir-spec-latest.html
-ENV PATH ${HOME}/.local/bin:${REPO_DIR}/.local/bin:${PATH}
+ENV PATH=${HOME}/.local/bin:${REPO_DIR}/.local/bin:${PATH}
 
 {% if env -%}
 # The rest of the environment
 {% for item in env -%}
-ENV {{item[0]}} {{item[1]}}
+ENV {{item[0]}}={{item[1]}}
 {% endfor -%}
 {% endif -%}
 
@@ -137,24 +139,18 @@ ENV {{item[0]}} {{item[1]}}
 {% if preassemble_script_files -%}
 # If scripts required during build are present, copy them
 {% for src, dst in preassemble_script_files|dictsort %}
-COPY src/{{ src }} ${REPO_DIR}/{{ dst }}
+COPY --chown={{ user }}:{{ user }} src/{{ src }} ${REPO_DIR}/{{ dst }}
 {% endfor -%}
-{% endif -%}
-
-{% if preassemble_script_directives -%}
-USER root
-RUN chown -R ${NB_USER}:${NB_USER} ${REPO_DIR}
 {% endif -%}
 
 {% for sd in preassemble_script_directives -%}
 {{ sd }}
 {% endfor %}
-
-# Copy and chown stuff. This doubles the size of the repo, because
-# you can't actually copy as USER, only as root! Thanks, Docker!
+# ensure root user after preassemble scripts
 USER root
-COPY src/ ${REPO_DIR}
-RUN chown -R ${NB_USER}:${NB_USER} ${REPO_DIR}
+
+# Copy stuff.
+COPY --chown={{ user }}:{{ user }} src/ ${REPO_DIR}/
 
 # Run assemble scripts! These will actually turn the specification
 # in the repository into an image.
@@ -183,10 +179,12 @@ RUN ./{{ s }}
 # Add start script
 {% if start_script is not none -%}
 RUN chmod +x "{{ start_script }}"
-ENV R2D_ENTRYPOINT "{{ start_script }}"
+ENV R2D_ENTRYPOINT="{{ start_script }}"
 {% endif -%}
 
 # Add entrypoint
+ENV PYTHONUNBUFFERED=1
+COPY /python3-login /usr/local/bin/python3-login
 COPY /repo2docker-entrypoint /usr/local/bin/repo2docker-entrypoint
 ENTRYPOINT ["/usr/local/bin/repo2docker-entrypoint"]
 
@@ -199,9 +197,10 @@ CMD ["jupyter", "notebook", "--ip", "0.0.0.0"]
 {% endif %}
 """
 
-ENTRYPOINT_FILE = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "repo2docker-entrypoint"
-)
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+# Also used for the group
+DEFAULT_NB_UID = 1000
 
 
 class BuildPack:
@@ -211,7 +210,6 @@ class BuildPack:
     Specifically used for creating Dockerfiles for use with repo2docker only.
 
     Things that are kept constant:
-     - base image
      - some environment variables (such as locale)
      - user creation & ownership of home directory
      - working directory
@@ -221,9 +219,13 @@ class BuildPack:
 
     """
 
-    def __init__(self):
+    def __init__(self, base_image):
+        """
+        base_image specifies the base image to use when building docker images
+        """
         self.log = logging.getLogger("repo2docker")
         self.appendix = ""
+        self.base_image = base_image
         self.labels = {}
         if sys.platform.startswith("win"):
             self.log.warning(
@@ -253,8 +255,9 @@ class BuildPack:
         return {
             # Utils!
             "less",
-            "nodejs",
             "unzip",
+            # Gives us envsubst
+            "gettext-base",
         }
 
     def get_build_env(self):
@@ -314,70 +317,16 @@ class BuildPack:
         """
         return {}
 
-    @property
-    def stencila_manifest_dir(self):
-        """Find the stencila manifest dir if it exists"""
-        if hasattr(self, "_stencila_manifest_dir"):
-            return self._stencila_manifest_dir
+    def _check_stencila(self):
+        """Find the stencila manifest dir if it exists
 
-        # look for a manifest.xml that suggests stencila could be used
-        # when we find one, stencila should be installed
-        # and set environment variables such that
-        # this file is located at:
-        # ${STENCILA_ARCHIVE_DIR}/${STENCILA_ARCHIVE}/manifest.xml
-
-        self._stencila_manifest_dir = None
-
+        And warn about removed stencila support
+        """
         for root, dirs, files in os.walk("."):
             if "manifest.xml" in files:
-                self.log.debug("Found a manifest.xml at %s", root)
-                self._stencila_manifest_dir = root.split(os.path.sep, 1)[1]
-                self.log.info(
-                    "Using stencila manifest.xml in %s", self._stencila_manifest_dir
+                self.log.error(
+                    f"Found a stencila manifest.xml at {root}. Stencila is no longer supported."
                 )
-                break
-        return self._stencila_manifest_dir
-
-    @property
-    def stencila_contexts(self):
-        """Find the stencila manifest contexts from file path in manifest"""
-        if hasattr(self, "_stencila_contexts"):
-            return self._stencila_contexts
-
-        # look at the content of the documents in the manifest
-        # to extract the required execution contexts
-        self._stencila_contexts = set()
-
-        # get paths to the article files from manifest
-        files = []
-        if self.stencila_manifest_dir:
-            manifest = ET.parse(
-                os.path.join(self.stencila_manifest_dir, "manifest.xml")
-            )
-            documents = manifest.findall("./documents/document")
-            files = [
-                os.path.join(self.stencila_manifest_dir, x.get("path"))
-                for x in documents
-            ]
-
-        else:
-            return self._stencila_contexts
-
-        for filename in files:
-            self.log.debug("Extracting contexts from %s", filename)
-
-            # extract code languages from file
-            document = ET.parse(filename)
-            code_chunks = document.findall('.//code[@specific-use="source"]')
-            languages = [x.get("language") for x in code_chunks]
-            self._stencila_contexts.update(languages)
-
-            self.log.info(
-                "Added executions contexts, now have %s", self._stencila_contexts
-            )
-            break
-
-        return self._stencila_contexts
 
     def get_build_scripts(self):
         """
@@ -507,17 +456,19 @@ class BuildPack:
     def detect(self):
         return True
 
-    def render(self):
+    def render(self, build_args=None):
         """
         Render BuildPack into Dockerfile
         """
+        build_args = build_args or {}
+
         t = jinja2.Template(TEMPLATE)
 
         build_script_directives = []
         last_user = "root"
         for user, script in self.get_build_scripts():
             if last_user != user:
-                build_script_directives.append("USER {}".format(user))
+                build_script_directives.append(f"USER {user}")
                 last_user = user
             build_script_directives.append(
                 "RUN {}".format(textwrap.dedent(script.strip("\n")))
@@ -527,7 +478,7 @@ class BuildPack:
         last_user = "root"
         for user, script in self.get_assemble_scripts():
             if last_user != user:
-                assemble_script_directives.append("USER {}".format(user))
+                assemble_script_directives.append(f"USER {user}")
                 last_user = user
             assemble_script_directives.append(
                 "RUN {}".format(textwrap.dedent(script.strip("\n")))
@@ -537,7 +488,7 @@ class BuildPack:
         last_user = "root"
         for user, script in self.get_preassemble_scripts():
             if last_user != user:
-                preassemble_script_directives.append("USER {}".format(user))
+                preassemble_script_directives.append(f"USER {user}")
                 last_user = user
             preassemble_script_directives.append(
                 "RUN {}".format(textwrap.dedent(script.strip("\n")))
@@ -554,6 +505,9 @@ class BuildPack:
             for k, v in self.get_build_script_files().items()
         }
 
+        # check if there's a stencila manifest, support for which has been removd
+        self._check_stencila()
+
         return t.render(
             packages=sorted(self.get_packages()),
             path=self.get_path(),
@@ -569,6 +523,9 @@ class BuildPack:
             post_build_scripts=self.get_post_build_scripts(),
             start_script=self.get_start_script(),
             appendix=self.appendix,
+            # For docker 17.09 `COPY --chown`, 19.03 would allow using $NBUSER
+            user=build_args.get("NB_UID", DEFAULT_NB_UID),
+            base_image=self.base_image,
         )
 
     @staticmethod
@@ -612,7 +569,7 @@ class BuildPack:
         tarf = io.BytesIO()
         tar = tarfile.open(fileobj=tarf, mode="w")
         dockerfile_tarinfo = tarfile.TarInfo("Dockerfile")
-        dockerfile = self.render().encode("utf-8")
+        dockerfile = self.render(build_args).encode("utf-8")
         dockerfile_tarinfo.size = len(dockerfile)
 
         tar.addfile(dockerfile_tarinfo, io.BytesIO(dockerfile))
@@ -624,15 +581,16 @@ class BuildPack:
             # https://github.com/docker/docker-py/pull/1582 is related
             tar.uname = ""
             tar.gname = ""
-            tar.uid = int(build_args.get("NB_UID", 1000))
-            tar.gid = int(build_args.get("NB_UID", 1000))
+            tar.uid = int(build_args.get("NB_UID", DEFAULT_NB_UID))
+            tar.gid = int(build_args.get("NB_UID", DEFAULT_NB_UID))
             return tar
 
         for src in sorted(self.get_build_script_files()):
             dest_path, src_path = self.generate_build_context_filename(src)
             tar.add(src_path, dest_path, filter=_filter_tar)
 
-        tar.add(ENTRYPOINT_FILE, "repo2docker-entrypoint", filter=_filter_tar)
+        for fname in ("repo2docker-entrypoint", "python3-login"):
+            tar.add(os.path.join(HERE, fname), fname, filter=_filter_tar)
 
         tar.add(".", "src/", filter=_filter_tar)
 
@@ -643,8 +601,8 @@ class BuildPack:
         # buildpacks/docker.py where it is duplicated
         if not isinstance(memory_limit, int):
             raise ValueError(
-                "The memory limit has to be specified as an"
-                "integer but is '{}'".format(type(memory_limit))
+                "The memory limit has to be specified as an "
+                f"integer but is '{type(memory_limit)}'"
             )
         limits = {}
         if memory_limit:
@@ -659,17 +617,13 @@ class BuildPack:
             tag=image_spec,
             custom_context=True,
             buildargs=build_args,
-            decode=True,
-            forcerm=True,
-            rm=True,
             container_limits=limits,
             cache_from=cache_from,
         )
 
         build_kwargs.update(extra_build_kwargs)
 
-        for line in client.build(**build_kwargs):
-            yield line
+        yield from client.build(**build_kwargs)
 
 
 class BaseImage(BuildPack):
@@ -677,51 +631,11 @@ class BaseImage(BuildPack):
         """Return env directives required for build"""
         return [
             ("APP_BASE", "/srv"),
-            ("NPM_DIR", "${APP_BASE}/npm"),
-            ("NPM_CONFIG_GLOBALCONFIG", "${NPM_DIR}/npmrc"),
         ]
-
-    def get_path(self):
-        return super().get_path() + ["${NPM_DIR}/bin"]
-
-    def get_build_scripts(self):
-        scripts = [
-            (
-                "root",
-                r"""
-                mkdir -p ${NPM_DIR} && \
-                chown -R ${NB_USER}:${NB_USER} ${NPM_DIR}
-                """,
-            ),
-            (
-                "${NB_USER}",
-                r"""
-                npm config --global set prefix ${NPM_DIR}
-                """,
-            ),
-        ]
-
-        return super().get_build_scripts() + scripts
 
     def get_env(self):
         """Return env directives to be set after build"""
-        env = []
-        if self.stencila_manifest_dir:
-            # manifest_dir is the path containing the manifest.xml
-            # archive_dir is the directory containing archive directories
-            # (one level up) default archive is the name of the directory
-            # in the archive_dir such that
-            # ${STENCILA_ARCHIVE_DIR}/${STENCILA_ARCHIVE}/manifest.xml
-            # exists.
-
-            archive_dir, archive = os.path.split(self.stencila_manifest_dir)
-            env.extend(
-                [
-                    ("STENCILA_ARCHIVE_DIR", "${REPO_DIR}/" + archive_dir),
-                    ("STENCILA_ARCHIVE", archive),
-                ]
-            )
-        return env
+        return []
 
     def detect(self):
         return True
@@ -740,8 +654,7 @@ class BaseImage(BuildPack):
                     # FIXME: Add support for specifying version numbers
                     if not re.match(r"^[a-z0-9.+-]+", package):
                         raise ValueError(
-                            "Found invalid package name {} in "
-                            "apt.txt".format(package)
+                            f"Found invalid package name {package} in apt.txt"
                         )
                     extra_apt_packages.append(package)
 
@@ -764,32 +677,6 @@ class BaseImage(BuildPack):
         except FileNotFoundError:
             pass
 
-        if "py" in self.stencila_contexts:
-            scripts.extend(
-                [
-                    (
-                        "${NB_USER}",
-                        r"""
-                        ${KERNEL_PYTHON_PREFIX}/bin/pip install --no-cache https://github.com/stencila/py/archive/f1260796.tar.gz && \
-                        ${KERNEL_PYTHON_PREFIX}/bin/python -m stencila register
-                        """,
-                    )
-                ]
-            )
-        if self.stencila_manifest_dir:
-            scripts.extend(
-                [
-                    (
-                        "${NB_USER}",
-                        r"""
-                        ${NB_PYTHON_PREFIX}/bin/pip install --no-cache nbstencilaproxy==0.1.1 && \
-                        jupyter serverextension enable --sys-prefix --py nbstencilaproxy && \
-                        jupyter nbextension install    --sys-prefix --py nbstencilaproxy && \
-                        jupyter nbextension enable     --sys-prefix --py nbstencilaproxy
-                        """,
-                    )
-                ]
-            )
         return scripts
 
     def get_assemble_scripts(self):

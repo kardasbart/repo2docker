@@ -1,11 +1,12 @@
-import re
-import os
 import datetime
+import os
+import re
 
-from distutils.version import LooseVersion as V
+import requests
 
+from ..semver import parse_version as V
+from ._r_base import rstudio_base_scripts
 from .python import PythonBuildPack
-from ._r_base import rstudio_base_scripts, DEVTOOLS_VERSION, IRKERNEL_VERSION
 
 
 class RBuildPack(PythonBuildPack):
@@ -19,30 +20,25 @@ class RBuildPack(PythonBuildPack):
        r-<year>-<month>-<date>
 
        Where 'year', 'month' and 'date' refer to a specific
-       date snapshot of https://mran.microsoft.com/timemachine
-       from which libraries are to be installed.
+       date whose CRAN snapshot we will use to fetch packages.
+       Uses https://packagemanager.rstudio.com, or MRAN if no snapshot
+       is found on packagemanager.rstudio.com
 
     2. A `DESCRIPTION` file signaling an R package
 
-    3. A Stencila document (*.jats.xml) with R code chunks (i.e. language="r")
-
-    If there is no `runtime.txt`, then the MRAN snapshot is set to latest
+    If there is no `runtime.txt`, then the CRAN snapshot is set to latest
     date that is guaranteed to exist across timezones.
 
     Additional R packages are installed if specified either
 
     - in a file `install.R`, that will be executed at build time,
-      and can be used for installing packages from both MRAN and GitHub
+      and can be used for installing packages from both CRAN and GitHub
 
     - as dependencies in a `DESCRIPTION` file
 
-    - are needed by a specific tool, for example the package `stencila` is
-      installed and configured if a Stencila document is given.
+    - are needed by a specific tool
 
-    The `r-base` package from Ubuntu apt repositories is used to install
-    R itself, rather than any of the methods from https://cran.r-project.org/.
-
-    The `r-base-dev` package is installed as advised in RStudio instructions.
+    R is installed from https://docs.rstudio.com/resources/install-r/
     """
 
     @property
@@ -67,38 +63,46 @@ class RBuildPack(PythonBuildPack):
         Will return the version specified by the user or the current default
         version.
         """
+        # Available versions at https://cran.r-project.org/src/base/
         version_map = {
-            "3.4": "3.4",
-            "3.5": "3.5.3-1bionic",
-            "3.5.0": "3.5.0-1bionic",
-            "3.5.1": "3.5.1-2bionic",
-            "3.5.2": "3.5.2-1bionic",
-            "3.5.3": "3.5.3-1bionic",
-            "3.6": "3.6.1-3bionic",
-            "3.6.0": "3.6.0-2bionic",
-            "3.6.1": "3.6.1-3bionic",
+            "4.2": "4.2.1",
+            "4.1": "4.1.3",
+            "4.0": "4.0.5",
+            "3.6": "3.6.3",
+            "3.5": "3.5.3",
+            "3.4": "3.4.4",
+            "3.3": "3.3.3",
         }
+
         # the default if nothing is specified
-        r_version = "3.6"
+        # Use full version is needed here, so it a valid semver
+        #
+        # NOTE: When updating this version, also update
+        #       - tests/unit/test_r.py -> test_version_specification
+        #       - tests/r/r-rspm-apt/verify
+        #
+        r_version = version_map["4.2"]
 
         if not hasattr(self, "_r_version"):
             parts = self.runtime.split("-")
+            # If runtime.txt is not set, or if it isn't of the form r-<version>-<yyyy>-<mm>-<dd>,
+            # we don't use any of it in determining r version and just use the default
             if len(parts) == 5:
                 r_version = parts[1]
-                if r_version not in version_map:
-                    raise ValueError(
-                        "Version '{}' of R is not supported.".format(r_version)
-                    )
+                # For versions of form x.y, we want to explicitly provide x.y.z - latest patchlevel
+                # available. Users can however explicitly specify the full version to get something specific
+                if r_version in version_map:
+                    r_version = version_map[r_version]
 
             # translate to the full version string
-            self._r_version = version_map.get(r_version)
+            self._r_version = r_version
 
         return self._r_version
 
     @property
     def checkpoint_date(self):
         """
-        Return the date of MRAN checkpoint to use for this repo
+        Return the date of CRAN checkpoint to use for this repo
 
         Returns '' if no date is specified
         """
@@ -128,18 +132,29 @@ class RBuildPack(PythonBuildPack):
             return True
 
         description_R = "DESCRIPTION"
-        if (
-            not self.binder_dir and os.path.exists(description_R)
-        ) or "r" in self.stencila_contexts:
+        if not self.binder_dir and os.path.exists(description_R):
             if not self.checkpoint_date:
                 # no R snapshot date set through runtime.txt
-                # set the R runtime to the latest date that is guaranteed to
-                # be on MRAN across timezones
+                # Set it to two days ago from today
                 self._checkpoint_date = datetime.date.today() - datetime.timedelta(
                     days=2
                 )
-                self._runtime = "r-{}".format(str(self._checkpoint_date))
+                self._runtime = f"r-{str(self._checkpoint_date)}"
             return True
+
+    def get_env(self):
+        """
+        Set custom env vars needed for RStudio to load
+        """
+        return super().get_env() + [
+            # rstudio (rsession) can't seem to find R unless we explicitly tell it where
+            # it is - just $PATH isn't enough. I discovered these are the env vars it
+            # looks for by digging through RStudio source and finding
+            # https://github.com/rstudio/rstudio/blob/v2022.02.3+492/src/cpp/r/session/RDiscovery.cpp
+            ("R_HOME", f"/opt/R/{self.r_version}/lib/R"),
+            ("R_DOC_DIR", "${R_HOME}/doc"),
+            ("LD_LIBRARY_PATH", "${R_HOME}/lib:${LD_LIBRARY_PATH}"),
+        ]
 
     def get_path(self):
         """
@@ -177,14 +192,74 @@ class RBuildPack(PythonBuildPack):
             "sudo",
             "lsb-release",
         ]
-        # For R 3.4 we use the default Ubuntu package, for other versions we
-        # install from a different PPA
-        if V(self.r_version) < V("3.5"):
-            packages.append("r-base")
-            packages.append("r-base-dev")
-            packages.append("libclang-dev")
 
         return super().get_packages().union(packages)
+
+    def get_rspm_snapshot_url(self, snapshot_date, max_days_prior=7):
+        for i in range(max_days_prior):
+            snapshots = requests.post(
+                "https://packagemanager.rstudio.com/__api__/url",
+                # Ask for midnight UTC snapshot
+                json={
+                    "repo": "all",
+                    "snapshot": (snapshot_date - datetime.timedelta(days=i)).strftime(
+                        "%Y-%m-%dT00:00:00Z"
+                    ),
+                },
+            ).json()
+            # Construct a snapshot URL that will give us binary packages for Ubuntu Bionic (18.04)
+            if "upsi" in snapshots:
+                return (
+                    # Env variables here are expanded by envsubst in the Dockerfile, after sourcing
+                    # /etc/os-release. This allows us to use distro specific variables here to get
+                    # appropriate binary packages without having to hard code version names here.
+                    "https://packagemanager.rstudio.com/all/__linux__/${VERSION_CODENAME}/"
+                    + snapshots["upsi"]
+                )
+        raise ValueError(
+            "No snapshot found for {} or {} days prior in packagemanager.rstudio.com".format(
+                snapshot_date.strftime("%Y-%m-%d"), max_days_prior
+            )
+        )
+
+    def get_mran_snapshot_url(self, snapshot_date, max_days_prior=7):
+        for i in range(max_days_prior):
+            try_date = snapshot_date - datetime.timedelta(days=i)
+            # Fall back to MRAN if packagemanager.rstudio.com doesn't have it
+            url = f"https://mran.microsoft.com/snapshot/{try_date.isoformat()}"
+            r = requests.head(url)
+            if r.ok:
+                return url
+        raise ValueError(
+            "No snapshot found for {} or {} days prior in mran.microsoft.com".format(
+                snapshot_date.strftime("%Y-%m-%d"), max_days_prior
+            )
+        )
+
+    def get_cran_mirror_url(self, snapshot_date):
+        # Date after which we will use rspm + binary packages instead of MRAN + source packages
+        rspm_cutoff_date = datetime.date(2022, 1, 1)
+
+        if snapshot_date >= rspm_cutoff_date or self.r_version >= V("4.1"):
+            return self.get_rspm_snapshot_url(snapshot_date)
+        else:
+            return self.get_mran_snapshot_url(snapshot_date)
+
+    def get_devtools_snapshot_url(self):
+        """
+        Return url of snapshot to use for getting devtools install
+
+        devtools is part of our 'core' base install, so we should have some
+        control over what version we install here.
+        """
+        # Picked from https://packagemanager.rstudio.com/client/#/repos/1/overview
+        # Hardcoded rather than dynamically determined from a date to avoid extra API calls
+        # Plus, we can always use packagemanager.rstudio.com here as we always install the
+        # necessary apt packages.
+        # Env variables here are expanded by envsubst in the Dockerfile, after sourcing
+        # /etc/os-release. This allows us to use distro specific variables here to get
+        # appropriate binary packages without having to hard code version names here.
+        return "https://packagemanager.rstudio.com/all/__linux__/${VERSION_CODENAME}/2022-06-03+Y3JhbiwyOjQ1MjYyMTU7RkM5ODcwN0M"
 
     def get_build_scripts(self):
         """
@@ -198,135 +273,83 @@ class RBuildPack(PythonBuildPack):
           for installing R packages into
         - RStudio
         - R's devtools package, at a particular frozen version
-          (determined by MRAN)
+          (determined by CRAN)
         - IRKernel
         - nbrsessionproxy (to access RStudio via Jupyter Notebook)
-        - stencila R package (if Stencila document with R code chunks detected)
 
         We set the snapshot date used to install R libraries from based on the
         contents of runtime.txt.
         """
 
-        mran_url = "https://mran.microsoft.com/snapshot/{}".format(
-            self.checkpoint_date.isoformat()
-        )
+        cran_mirror_url = self.get_cran_mirror_url(self.checkpoint_date)
 
-        scripts = []
-        # For R 3.4 we want to use the default Ubuntu package but otherwise
-        # we use the packages from a PPA
-        if V(self.r_version) >= V("3.5"):
-            scripts += [
-                (
-                    "root",
-                    r"""
-                    echo "deb https://cloud.r-project.org/bin/linux/ubuntu bionic-cran35/" > /etc/apt/sources.list.d/r3.6-ubuntu.list
-                    """,
-                ),
-                # Use port 80 to talk to the keyserver to increase the chances
-                # of being able to reach it from behind a firewall
-                (
-                    "root",
-                    r"""
-                    apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys E298A3A825C0D65DFD57CBB651716619E084DAB9
-                    """,
-                ),
-                (
-                    "root",
-                    r"""
-                    apt-get update && \
-                    apt-get install --yes r-base={R_version} \
-                         r-base-dev={R_version} \
-                         r-recommended={R_version} \
-                         libclang-dev && \
-                    apt-get -qq purge && \
-                    apt-get -qq clean && \
-                    rm -rf /var/lib/apt/lists/*
-                    """.format(
-                        R_version=self.r_version
-                    ),
-                ),
-            ]
+        scripts = [
+            (
+                "root",
+                rf"""
+                apt-get update > /dev/null && \
+                apt-get install --yes --no-install-recommends \
+                        libclang-dev \
+                        libzmq3-dev > /dev/null && \
+                wget --quiet -O /tmp/r-{self.r_version}.deb \
+                    https://cdn.rstudio.com/r/ubuntu-$(. /etc/os-release && echo $VERSION_ID | sed 's/\.//')/pkgs/r-{self.r_version}_1_amd64.deb && \
+                apt install --yes --no-install-recommends /tmp/r-{self.r_version}.deb > /dev/null && \
+                rm /tmp/r-{self.r_version}.deb && \
+                apt-get -qq purge && \
+                apt-get -qq clean && \
+                rm -rf /var/lib/apt/lists/* && \
+                ln -s /opt/R/{self.r_version}/bin/R /usr/local/bin/R && \
+                ln -s /opt/R/{self.r_version}/bin/Rscript /usr/local/bin/Rscript && \
+                R --version
+                """,
+            ),
+        ]
 
-        scripts.append(
+        scripts += rstudio_base_scripts(self.r_version)
+
+        scripts += [
             (
                 "root",
                 r"""
                 mkdir -p ${R_LIBS_USER} && \
                 chown -R ${NB_USER}:${NB_USER} ${R_LIBS_USER}
                 """,
-            )
-        )
-        scripts += rstudio_base_scripts()
-        scripts += [
+            ),
             (
                 "root",
                 # Set paths so that RStudio shares libraries with base R
                 # install. This first comments out any R_LIBS_USER that
                 # might be set in /etc/R/Renviron and then sets it.
-                r"""
-                sed -i -e '/^R_LIBS_USER=/s/^/#/' /etc/R/Renviron && \
-                echo "R_LIBS_USER=${R_LIBS_USER}" >> /etc/R/Renviron
+                rf"""
+                sed -i -e '/^R_LIBS_USER=/s/^/#/' /opt/R/{self.r_version}/lib/R/etc/Renviron && \
+                echo "R_LIBS_USER=${{R_LIBS_USER}}" >> /opt/R/{self.r_version}/lib/R/etc/Renviron
+                """,
+            ),
+            (
+                "root",
+                # RStudio's CRAN mirror needs this to figure out which binary package to serve.
+                # If not set properly, it will just serve up source packages
+                # Quite hilarious, IMO.
+                # See https://docs.rstudio.com/rspm/1.0.12/admin/binaries.html
+                # Set mirror for RStudio too, by modifying rsession.conf
+                rf"""
+                R RHOME && \
+                mkdir -p /etc/rstudio && \
+                EXPANDED_CRAN_MIRROR_URL="$(. /etc/os-release && echo {cran_mirror_url} | envsubst)" && \
+                echo "options(repos = c(CRAN = \"${{EXPANDED_CRAN_MIRROR_URL}}\"))" > /opt/R/{self.r_version}/lib/R/etc/Rprofile.site && \
+                echo "r-cran-repos=${{EXPANDED_CRAN_MIRROR_URL}}" > /etc/rstudio/rsession.conf
                 """,
             ),
             (
                 "${NB_USER}",
-                # Install a pinned version of IRKernel and set it up for use!
-                r"""
-                R --quiet -e "install.packages('devtools', repos='https://mran.microsoft.com/snapshot/{devtools_version}', method='libcurl')" && \
-                R --quiet -e "devtools::install_github('IRkernel/IRkernel', ref='{irkernel_version}')" && \
-                R --quiet -e "IRkernel::installspec(prefix='$NB_PYTHON_PREFIX')"
-                """.format(
-                    devtools_version=DEVTOOLS_VERSION, irkernel_version=IRKERNEL_VERSION
-                ),
-            ),
-            (
-                "${NB_USER}",
-                # Install shiny library
-                r"""
-                R --quiet -e "install.packages('shiny', repos='{}', method='libcurl')"
-                """.format(
-                    mran_url
-                ),
-            ),
-            (
-                "root",
-                # We set the default CRAN repo to the MRAN one at given date
-                # We set download method to be curl so we get HTTPS support
-                r"""
-                echo "options(repos = c(CRAN='{mran_url}'), download.file.method = 'libcurl')" > /etc/R/Rprofile.site
-                """.format(
-                    mran_url=mran_url
-                ),
+                # Install a pinned version of devtools, IRKernel and shiny
+                rf"""
+                export EXPANDED_CRAN_MIRROR_URL="$(. /etc/os-release && echo {cran_mirror_url} | envsubst)" && \
+                R --quiet -e "install.packages(c('devtools', 'IRkernel', 'shiny'), repos=Sys.getenv(\"EXPANDED_CRAN_MIRROR_URL\"))" && \
+                R --quiet -e "IRkernel::installspec(prefix=Sys.getenv(\"NB_PYTHON_PREFIX\"))"
+                """,
             ),
         ]
-
-        if "r" in self.stencila_contexts:
-            # new versions of R require a different way of installing bioconductor
-            if V(self.r_version) <= V("3.5"):
-                scripts += [
-                    (
-                        "${NB_USER}",
-                        # Install and register stencila library
-                        r"""
-                    R --quiet -e "source('https://bioconductor.org/biocLite.R'); biocLite('graph')" && \
-                    R --quiet -e "devtools::install_github('stencila/r', ref = '361bbf560f3f0561a8612349bca66cd8978f4f24')" && \
-                    R --quiet -e "stencila::register()"
-                    """,
-                    )
-                ]
-
-            else:
-                scripts += [
-                    (
-                        "${NB_USER}",
-                        # Install and register stencila library
-                        r"""
-                    R --quiet -e "install.packages('BiocManager'); BiocManager::install(); BiocManager::install(c('graph'))" && \
-                    R --quiet -e "devtools::install_github('stencila/r', ref = '361bbf560f3f0561a8612349bca66cd8978f4f24')" && \
-                    R --quiet -e "stencila::register()"
-                    """,
-                    )
-                ]
 
         return super().get_build_scripts() + scripts
 
@@ -355,7 +378,9 @@ class RBuildPack(PythonBuildPack):
             scripts += [
                 (
                     "${NB_USER}",
-                    "Rscript %s && touch /tmp/.preassembled || true" % installR_path,
+                    # Delete /tmp/downloaded_packages only if install.R fails, as the second
+                    # invocation of install.R might be able to reuse them
+                    f"Rscript {installR_path} && touch /tmp/.preassembled || true && rm -rf /tmp/downloaded_packages",
                 )
             ]
 
@@ -371,9 +396,8 @@ class RBuildPack(PythonBuildPack):
                 (
                     "${NB_USER}",
                     # only run install.R if the pre-assembly failed
-                    "if [ ! -f /tmp/.preassembled ]; then Rscript {}; fi".format(
-                        installR_path
-                    ),
+                    # Delete any downloaded packages in /tmp, as they aren't reused by R
+                    f"""if [ ! -f /tmp/.preassembled ]; then Rscript {installR_path}; rm -rf /tmp/downloaded_packages; fi""",
                 )
             ]
 

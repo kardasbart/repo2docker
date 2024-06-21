@@ -1,20 +1,20 @@
 import errno
-import pytest
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-import docker
 import escapism
+import pytest
 
-from repo2docker.app import Repo2Docker
+import docker
 from repo2docker.__main__ import make_r2d
+from repo2docker.app import Repo2Docker
 from repo2docker.utils import chdir
 
 
 def test_find_image():
     images = [{"RepoTags": ["some-org/some-repo:latest"]}]
 
-    with patch("repo2docker.app.docker.APIClient") as FakeDockerClient:
+    with patch("repo2docker.docker.docker.APIClient") as FakeDockerClient:
         instance = FakeDockerClient.return_value
         instance.images.return_value = images
 
@@ -28,7 +28,7 @@ def test_find_image():
 def test_dont_find_image():
     images = [{"RepoTags": ["some-org/some-image-name:latest"]}]
 
-    with patch("repo2docker.app.docker.APIClient") as FakeDockerClient:
+    with patch("repo2docker.docker.docker.APIClient") as FakeDockerClient:
         instance = FakeDockerClient.return_value
         instance.images.return_value = images
 

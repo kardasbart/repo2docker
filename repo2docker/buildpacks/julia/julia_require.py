@@ -1,8 +1,8 @@
 """Generates a Dockerfile based on an input matrix with REQUIRE for legacy Julia"""
 
-from distutils.version import LooseVersion as V
 import os
 
+from ...semver import parse_version as V
 from ..python import PythonBuildPack
 
 
@@ -88,9 +88,9 @@ class JuliaRequireBuildPack(PythonBuildPack):
     def get_path(self):
         """Adds path to Julia binaries to user's PATH.
 
-         Returns:
-             an ordered list of path strings. The path to the Julia
-             executable is added to the list.
+        Returns:
+            an ordered list of path strings. The path to the Julia
+            executable is added to the list.
 
         """
         return super().get_path() + ["${JULIA_HOME}"]

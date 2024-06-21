@@ -1,12 +1,14 @@
 """
 Tests for repo2docker/utils.py
 """
-import traitlets
 import os
-from repo2docker import utils
-import pytest
 import subprocess
 import tempfile
+
+import pytest
+import traitlets
+
+from repo2docker import utils
 
 
 def test_capture_cmd_no_capture_success():
@@ -25,6 +27,14 @@ def test_capture_cmd_capture_success():
     # This should succeed
     for line in utils.execute_cmd(["/bin/bash", "-c", "echo test"], capture=True):
         assert line == "test\n"
+
+
+def test_capture_cmd_noeol_capture_success():
+    # This should succeed
+    lines = list(
+        utils.execute_cmd(["/bin/bash", "-c", "echo -en 'test\ntest'"], capture=True)
+    )
+    assert lines == ["test\n", "test"]
 
 
 def test_capture_cmd_capture_fail():
@@ -82,7 +92,7 @@ def test_invalid_port_mapping(port_spec):
     with pytest.raises(ValueError) as e:
         utils.validate_and_generate_port_mapping([port_spec])
 
-    assert 'Port specification "{}"'.format(port_spec) in str(e.value)
+    assert f'Port specification "{port_spec}"' in str(e.value)
 
 
 def test_deep_get():
@@ -127,12 +137,25 @@ def test_open_guess_encoding():
     [
         ("-r requirements.txt", True),
         ("-e .", True),
+        ("--editable=.", True),
+        (
+            "--editable=git+https://github.com/popgensims/stdpopsim.git#egg=stdpopsim-master",
+            False,
+        ),
         ("file://subdir", True),
         ("file://./subdir", True),
-        ("git://github.com/jupyter/repo2docker", False),
-        ("git+https://github.com/jupyter/repo2docker", False),
+        ("git://github.com/jupyterhub/repo2docker", False),
+        ("git+https://github.com/jupyterhub/repo2docker", False),
         ("numpy", False),
         ("# -e .", False),
+        ("--pre", False),
+        # pip ignores the package name and treats this like `--pre` on a line
+        # by itself
+        ("--pre pandas", False),
+        # These are invalid lines as far as pip is concerned, check that our
+        # code is robust and continues running
+        ("--unrecognized", False),
+        ("-e", False),
     ],
 )
 def test_local_pip_requirement(req, is_local):

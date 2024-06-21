@@ -11,6 +11,7 @@ import re
 
 import toml
 
+from ...semver import parse_version as V
 from ..conda import CondaBuildPack
 
 VERSION_PAT = re.compile(r"\d+(\.\d+)*")
@@ -87,14 +88,21 @@ class PipfileBuildPack(CondaBuildPack):
         """scripts to run prior to staging the repo contents"""
         scripts = super().get_preassemble_scripts()
         # install pipenv to install dependencies within Pipfile.lock or Pipfile
+        if V(self.python_version) < V("3.6"):
+            # last pipenv version to support 2.7, 3.5
+            pipenv_version = "2021.5.29"
+        else:
+            pipenv_version = "2022.1.8"
         scripts.append(
-            ("${NB_USER}", "${KERNEL_PYTHON_PREFIX}/bin/pip install pipenv==2018.11.26")
+            (
+                "${NB_USER}",
+                f"${{KERNEL_PYTHON_PREFIX}}/bin/pip install --no-cache-dir pipenv=={pipenv_version}",
+            )
         )
         return scripts
 
     def get_assemble_scripts(self):
-        """Return series of build-steps specific to this repository.
-        """
+        """Return series of build-steps specific to this repository."""
         # If we have either Pipfile.lock, Pipfile, or runtime.txt declare the
         # use of Python 2, Python 2.7 will be made available in the *kernel*
         # environment. The notebook servers environment on the other hand
@@ -115,9 +123,7 @@ class PipfileBuildPack(CondaBuildPack):
                 assemble_scripts.append(
                     (
                         "${NB_USER}",
-                        '${{NB_PYTHON_PREFIX}}/bin/pip install --no-cache-dir -r "{}"'.format(
-                            nb_requirements_file
-                        ),
+                        f'${{NB_PYTHON_PREFIX}}/bin/pip install --no-cache-dir -r "{nb_requirements_file}"',
                     )
                 )
 
@@ -155,7 +161,8 @@ class PipfileBuildPack(CondaBuildPack):
                 "${NB_USER}",
                 """(cd {working_directory} && \\
                     PATH="${{KERNEL_PYTHON_PREFIX}}/bin:$PATH" \\
-                        pipenv install {install_option} --system --dev \\
+                        pipenv install {install_option} --system --dev && \\
+                        pipenv --clear \\
                 )""".format(
                     working_directory=working_directory,
                     install_option="--ignore-pipfile"
@@ -168,8 +175,7 @@ class PipfileBuildPack(CondaBuildPack):
         return assemble_scripts
 
     def detect(self):
-        """Check if current repo should be built with the Pipfile buildpack.
-        """
+        """Check if current repo should be built with the Pipfile buildpack."""
         # first make sure python is not explicitly unwanted
         runtime_txt = self.binder_path("runtime.txt")
         if os.path.exists(runtime_txt):

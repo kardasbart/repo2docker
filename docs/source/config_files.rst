@@ -22,14 +22,14 @@ can be found on this page (and to the right).
 
 .. _environment.yml:
 
-``environment.yml`` - Install a Python environment
-==================================================
+``environment.yml`` - Install a conda environment
+=================================================
 
 ``environment.yml`` is the standard configuration file used by `conda <https://conda.io>`_
 that lets you install any kind of package,
 including Python, R, and C/C++ packages.
 ``repo2docker`` does not use your ``environment.yml`` to create and activate a new conda environment.
-Rather, it updates a base conda environment `defined here <https://github.com/jupyter/repo2docker/blob/master/repo2docker/buildpacks/conda/environment.yml>`_ with the packages listed in your ``environment.yml``.
+Rather, it updates a base conda environment `defined here <https://github.com/jupyterhub/repo2docker/blob/HEAD/repo2docker/buildpacks/conda/environment.yml>`_ with the packages listed in your ``environment.yml``.
 This means that the environment will always have the same default name, not the name
 specified in your ``environment.yml``.
 
@@ -37,7 +37,7 @@ specified in your ``environment.yml``.
 
    You can install files from pip in your ``environment.yml`` as well.
    For example, see the `binder-examples environment.yml
-   <https://github.com/binder-examples/python-conda_pip/blob/master/environment.yml>`_
+   <https://github.com/binder-examples/python-conda_pip/blob/HEAD/environment.yml>`_
    file.
 
 You can also specify which Python version to install in your built environment
@@ -73,7 +73,7 @@ both kinds.
 
 This specifies a list of Python packages that should be installed in your
 environment. Our
-`requirements.txt example <https://github.com/binder-examples/requirements/blob/master/requirements.txt>`_
+`requirements.txt example <https://github.com/binder-examples/requirements/blob/HEAD/requirements.txt>`_
 on GitHub shows a typical requirements file.
 
 
@@ -120,7 +120,7 @@ with ``REQUIRE`` and ``environment.yml``, visit
 This is used to install R libraries pinned to a specific snapshot on
 `MRAN <https://mran.microsoft.com/documents/rro/reproducibility>`_.
 To set the date of the snapshot add a runtime.txt_.
-For an example ``install.R`` file, visit our `example install.R file <https://github.com/binder-examples/r/blob/master/install.R>`_.
+For an example ``install.R`` file, visit our `example install.R file <https://github.com/binder-examples/r/blob/HEAD/install.R>`_.
 
 
 .. _apt.txt:
@@ -132,7 +132,7 @@ A list of Debian packages that should be installed. The base image used is usual
 version of Ubuntu.
 
 We use ``apt.txt``, for example, to install LaTeX in our
-`example apt.txt for LaTeX <https://github.com/binder-examples/latex/blob/master/apt.txt>`_.
+`example apt.txt for LaTeX <https://github.com/binder-examples/latex/blob/HEAD/apt.txt>`_.
 
 
 .. _DESCRIPTION:
@@ -142,30 +142,12 @@ We use ``apt.txt``, for example, to install LaTeX in our
 
 To install your repository like an R package, you may include a
 ``DESCRIPTION`` file. repo2docker installs the package and dependencies
-from the ``DESCRIPTION`` by running ``devtools:install_git(".")``.
+from the ``DESCRIPTION`` by running ``devtools::install_local(getwd())``.
 
-You also need to have a ``runtime.txt`` file that is formatted as
-``r-<YYYY>-<MM>-<DD>``, where YYYY-MM-DD is a snapshot of MRAN that will be
-used for your R installation.
-
-
-.. _manifest.xml:
-
-``manifest.xml`` - Install Stencila
-===================================
-
-`Stencila <https://stenci.la/>`_ is an open source office suite for reproducible research.
-It is powered by the open file format `Dar <https://github.com/substance/dar>`_.
-
-If your repository contains a Stencila document, repo2docker detects it based on the file ``manifest.xml``.
-The required `execution contexts <https://stenci.la/learn/intro.html>`_ are extracted from a Dar article (i.e.
-files named ``*.jats.xml``).
-
-You may also have a ``runtime.txt`` and/or an ``install.R`` to manually configure your R installation.
-
-To see example repositories, visit our
-`Stencila with R <https://github.com/binder-examples/stencila-r/>`_ and
-`Stencila with Python <https://github.com/binder-examples/stencila-py>`_ examples.
+You can also have have a ``runtime.txt`` file that is formatted as
+``r-<YYYY>-<MM>-<DD>``, where YYYY-MM-DD is a snapshot of CRAN that will be used
+for your R installation. If ``runtime.txt`` isn't provided in this case, a
+recent date will be used.
 
 
 .. _postBuild:
@@ -181,7 +163,7 @@ You should include ``set -e`` or the equivalent at the start of the script to av
 
 An example use-case of ``postBuild`` file is JupyterLab's demo on mybinder.org.
 It uses a ``postBuild`` file in a folder called ``binder`` to `prepare
-their demo for binder <https://github.com/jupyterlab/jupyterlab-demo/blob/master/binder/postBuild>`_.
+their demo for binder <https://github.com/jupyterlab/jupyterlab-demo/blob/HEAD/binder/postBuild>`_.
 
 
 .. _start:
@@ -222,23 +204,13 @@ For these cases, we have a special file, ``runtime.txt``.
    (when using ``environment.yml`` for conda or ``Project.toml`` for Julia,
    ``runtime.txt`` will be ignored).
 
-To use python-2.7: add ``python-2.7`` in runtime.txt file.
-The repository will run in an env with
-Python 2 installed. To see a full example repository, visit our
-`Python2 example <https://github.com/binder-examples/python2_runtime/blob/master/runtime.txt>`_.
+Have ``python-x.y`` in ``runtime.txt`` to run the repository with Python version x.y.
+See our `Python2 example repository <https://github.com/binder-examples/python2_runtime/blob/HEAD/runtime.txt>`_.
 
-repo2docker uses R libraries pinned to a specific snapshot on
-`MRAN <https://mran.microsoft.com/documents/rro/reproducibility>`_.
-You need to have a ``runtime.txt`` file that is formatted as
-``r-<RVERSION>-<YYYY>-<MM>-<DD>``, where YYYY-MM-DD is a snapshot at MRAN that will be
-used for installing libraries. You can set RVERSION to 3.4, 3.5 or 3.6 to select
-the version of R you want to use. If you do not specify a R version the latest
-released version will be used (currently R 3.6). You can also specify the exact
-patch release you want to use for the 3.5 and 3.6 series.
-
-To see an example R repository, visit our `R
-example in binder-examples <https://github.com/binder-examples/r/blob/master/runtime.txt>`_.
-
+Have ``r-<RVERSION>-<YYYY>-<MM>-<DD>`` in ``runtime.txt`` to run the repository with R version RVERSION and libraries from a YYYY-MM-DD snapshot of `MRAN <https://mran.microsoft.com/documents/rro/reproducibility>`_.
+RVERSION can be set to 3.4, 3.5, 3.6, or to patch releases for the 3.5 and 3.6 series.
+If you do not specify a version, the latest release will be used (currently R 3.6).
+See our `R example repository <https://github.com/binder-examples/r/blob/HEAD/runtime.txt>`_.
 
 .. _default.nix:
 

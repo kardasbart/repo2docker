@@ -1,8 +1,13 @@
 """Generates a Dockerfile based on an input matrix for Julia"""
+import functools
 import os
+
+import requests
+import semver
 import toml
+
+from ...semver import find_semver_match
 from ..python import PythonBuildPack
-from .semver import find_semver_match
 
 
 class JuliaProjectTomlBuildPack(PythonBuildPack):
@@ -13,41 +18,54 @@ class JuliaProjectTomlBuildPack(PythonBuildPack):
     # ALL EXISTING JULIA VERSIONS
     # Note that these must remain ordered, in order for the find_semver_match()
     # function to behave correctly.
-    all_julias = [
-        "0.7.0",
-        "1.0.0",
-        "1.0.1",
-        "1.0.2",
-        "1.0.3",
-        "1.0.4",
-        "1.0.5",
-        "1.1.0",
-        "1.1.1",
-        "1.2.0",
-        "1.3.0",
-        "1.3.1",
-    ]
+    @property
+    @functools.lru_cache(maxsize=1)
+    def all_julias(self):
+        try:
+            json = requests.get(
+                "https://julialang-s3.julialang.org/bin/versions.json"
+            ).json()
+        except Exception as e:
+            raise RuntimeError("Failed to fetch available Julia versions: {e}")
+        vers = [semver.VersionInfo.parse(v) for v in json.keys()]
+        # filter out pre-release versions not supported by find_semver_match()
+        filtered_vers = [v for v in vers if v.prerelease is None]
+        # properly sort list of VersionInfo
+        sorted_vers = sorted(
+            filtered_vers, key=functools.cmp_to_key(semver.VersionInfo.compare)
+        )
+        # return list of semver string
+        return [str(v) for v in sorted_vers]
 
     @property
     def julia_version(self):
-        default_julia_version = self.all_julias[-1]
-
         if os.path.exists(self.binder_path("JuliaProject.toml")):
             project_toml = toml.load(self.binder_path("JuliaProject.toml"))
         else:
             project_toml = toml.load(self.binder_path("Project.toml"))
 
-        if "compat" in project_toml:
-            if "julia" in project_toml["compat"]:
-                julia_version_str = project_toml["compat"]["julia"]
+        try:
+            # For Project.toml files, install the latest julia version that
+            # satisfies the given semver.
+            compat = project_toml["compat"]["julia"]
+        except:
+            # Default version which needs to be manually updated with new major.minor releases
+            #
+            # NOTE: Updates to the default version should go hand in hand with
+            #       updates to tests/julia/project/verify where is intent to
+            #       test the version.
+            #
+            # FIXME: When compat = "1.6" is set below and passed to
+            #        find_semver_match, we get 1.8.2 as of 2022-10-09. We should
+            #        clarify the desired behavior and have a unit test of
+            #        find_semver_match to validate it.
+            #
+            compat = "1.6"
 
-                # For Project.toml files, install the latest julia version that
-                # satisfies the given semver.
-                _julia_version = find_semver_match(julia_version_str, self.all_julias)
-                if _julia_version is not None:
-                    return _julia_version
-
-        return default_julia_version
+        match = find_semver_match(compat, self.all_julias)
+        if match is None:
+            raise RuntimeError("Failed to find a matching Julia version: {compat}")
+        return match
 
     def get_build_env(self):
         """Get additional environment settings for Julia and Jupyter
@@ -75,15 +93,22 @@ class JuliaProjectTomlBuildPack(PythonBuildPack):
             ("JUPYTER_DATA_DIR", "${NB_PYTHON_PREFIX}/share/jupyter"),
         ]
 
+    @property
+    def project_dir(self):
+        if self.binder_dir:
+            return "${REPO_DIR}/" + self.binder_dir
+        else:
+            return "${REPO_DIR}"
+
     def get_env(self):
-        return super().get_env() + [("JULIA_PROJECT", "${REPO_DIR}")]
+        return super().get_env() + [("JULIA_PROJECT", self.project_dir)]
 
     def get_path(self):
         """Adds path to Julia binaries to user's PATH.
 
-         Returns:
-             an ordered list of path strings. The path to the Julia
-             executable is added to the list.
+        Returns:
+            an ordered list of path strings. The path to the Julia
+            executable is added to the list.
 
         """
         return super().get_path() + ["${JULIA_PATH}/bin"]
@@ -130,15 +155,19 @@ class JuliaProjectTomlBuildPack(PythonBuildPack):
         The parent, CondaBuildPack, will add the build steps for
         any needed Python packages found in environment.yml.
         """
-        return super().get_assemble_scripts() + [
+        scripts = super().get_assemble_scripts()
+        scripts.append(
             (
                 "${NB_USER}",
                 r"""
-                JULIA_PROJECT="" julia -e "using Pkg; Pkg.add(\"IJulia\"); using IJulia; installkernel(\"Julia\", \"--project=${REPO_DIR}\");" && \
-                julia --project=${REPO_DIR} -e 'using Pkg; Pkg.instantiate(); pkg"precompile"'
-                """,
+            JULIA_PROJECT="" julia -e "using Pkg; Pkg.add(\"IJulia\"); using IJulia; installkernel(\"Julia\", \"--project={project}\");" && \
+            julia --project={project} -e 'using Pkg; Pkg.instantiate(); Pkg.resolve(); pkg"precompile"'
+            """.format(
+                    project=self.project_dir
+                ),
             )
-        ]
+        )
+        return scripts
 
     def detect(self):
         """
